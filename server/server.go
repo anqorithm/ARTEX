@@ -52,8 +52,9 @@ type Server struct {
 
 	scrubSecrets bool // drop ARTEX_PG_DSN and the API keys from the environment once read (binary only)
 
-	setupMu    sync.Mutex
-	setupToken string // one-time token POST /api/auth/init requires; empty when none is active
+	setupMu     sync.Mutex
+	setupToken  string     // one-time token POST /api/auth/init requires; empty when none is active
+	authWriteMu sync.Mutex // serializes auth state writes with their in-memory version updates
 	// pwdVersion is auth.password_version, a counter. Zero means no password
 	// change is stored yet, and any valid token is accepted. pwdState is
 	// pwdUnreadable when that counter could not be read; every session is
@@ -65,7 +66,7 @@ type Server struct {
 	authHashKey    string
 	authVersionKey string
 
-	loginLimit     *loginLimiter  // per-IP attempt limit on POST /api/auth/login
+	loginLimit     *loginLimiter  // per-IP attempt limit for login and session revocation
 	trustedProxies []netip.Prefix // ARTEX_TRUSTED_PROXIES; see clientIP
 
 	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
@@ -742,6 +743,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/init", s.authInit)
 	mux.HandleFunc("POST /api/auth/login", s.authLogin)
 	mux.HandleFunc("POST /api/auth/change-password", s.authChangePassword)
+	mux.HandleFunc("POST /api/auth/revoke-sessions", s.authRevokeSessions)
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/stats", s.stats)

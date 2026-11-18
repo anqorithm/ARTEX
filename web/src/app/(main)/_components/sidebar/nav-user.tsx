@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { EllipsisVertical, KeyRound, LogOut } from "lucide-react";
+import { EllipsisVertical, KeyRound, LogOut, ShieldOff } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
@@ -18,6 +18,7 @@ import { auth } from "@/lib/auth";
 import { getInitials } from "@/lib/utils";
 
 import { ChangePasswordDialog } from "./change-password-dialog";
+import { RevokeSessionsDialog } from "./revoke-sessions-dialog";
 
 export function NavUser({
   user,
@@ -30,6 +31,7 @@ export function NavUser({
 }) {
   const { isMobile } = useSidebar();
   const [pwOpen, setPwOpen] = React.useState(false);
+  const [revokeOpen, setRevokeOpen] = React.useState(false);
 
   function handleLogout() {
     auth.clearToken();
@@ -86,10 +88,15 @@ export function NavUser({
               <LogOut />
               Sign out
             </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setRevokeOpen(true)} className="text-destructive focus:text-destructive">
+              <ShieldOff />
+              Sign out everywhere
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </SidebarMenuItem>
       <ChangePasswordDialog open={pwOpen} onOpenChange={setPwOpen} />
+      {revokeOpen && <RevokeSessionsDialog onClose={() => setRevokeOpen(false)} onSuccess={handleLogout} />}
     </SidebarMenu>
   );
 }

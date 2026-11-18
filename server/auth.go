@@ -446,6 +446,8 @@ func (s *Server) authInit(w http.ResponseWriter, r *http.Request) {
 	// The hash and version commit in one transaction. ON CONFLICT DO NOTHING on the
 	// hash keeps the first password: the GetSetting above is only a fast-fail path.
 	// bcrypt runs tens of milliseconds, another request may set the password meanwhile, and the read check itself can fail under an outage.
+	s.authWriteMu.Lock()
+	defer s.authWriteMu.Unlock()
 	version, inserted, err := pg.InsertPassword(s.passwordHashKey(), string(hash), s.passwordVersionKey())
 	if err != nil {
 		writeErr(w, 500, "Save failed: "+err.Error())
@@ -475,7 +477,8 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 	if pg == nil {
 		return
 	}
-	if !s.sessionOK(extractToken(r)) {
+	token := extractToken(r)
+	if !s.sessionOK(token) {
 		writeErr(w, 401, "Unauthorized")
 		return
 	}
@@ -515,12 +518,70 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	// Hash and version commit together. A failed write returns 500 and leaves
 	// the previous session valid. This response has no replacement token.
+	s.authWriteMu.Lock()
+	defer s.authWriteMu.Unlock()
+	if !s.sessionOK(token) {
+		writeErr(w, 401, "Unauthorized")
+		return
+	}
 	version, err := pg.RotatePassword(s.passwordHashKey(), string(newHash), s.passwordVersionKey())
 	if err != nil {
 		writeErr(w, 500, "Save failed: "+err.Error())
 		return
 	}
 	s.applyPasswordVersion(version)
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// POST /api/auth/revoke-sessions requires both a valid session and the current
+// password. Bumping the persisted version invalidates all existing tokens.
+func (s *Server) authRevokeSessions(w http.ResponseWriter, r *http.Request) {
+	token := extractToken(r)
+	if !s.sessionOK(token) {
+		writeErr(w, 401, "Unauthorized")
+		return
+	}
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := decode(w, r, &req); err != nil || req.Password == "" {
+		writeErr(w, 400, "Current password is required")
+		return
+	}
+	ip := clientIP(r, s.trustedProxies)
+	if wait := s.loginLimit.allow(ip); wait > 0 {
+		secs := int((wait + time.Second - 1) / time.Second)
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeErr(w, 429, fmt.Sprintf("Too many password attempts, try again in %d seconds", secs))
+		return
+	}
+	hash, ok, err := pg.GetSetting(s.passwordHashKey())
+	if err != nil {
+		writeErr(w, 503, errDataSourceUnavailable)
+		return
+	}
+	if !ok || bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
+		writeErr(w, 403, "Current password is wrong")
+		return
+	}
+	s.authWriteMu.Lock()
+	defer s.authWriteMu.Unlock()
+	if !s.sessionOK(token) {
+		writeErr(w, 401, "Unauthorized")
+		return
+	}
+	version, err := pg.BumpPasswordVersion(s.passwordVersionKey())
+	if err != nil {
+		log.Printf("[auth] revoke sessions: %v", err)
+		writeErr(w, 503, errDataSourceUnavailable)
+		return
+	}
+	s.applyPasswordVersion(version)
+	s.loginLimit.reset(ip)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -557,6 +618,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, getSetting func(s
 		writeErr(w, 401, "Incorrect username or password")
 		return
 	}
+	recovering := s.pwdState.Load() == pwdUnreadable
+	if recovering {
+		s.authWriteMu.Lock()
+		defer s.authWriteMu.Unlock()
+	}
+	// Read the version before checking the password. If a concurrent change
+	// revokes that version, this login cannot issue a token for the new one.
+	version := s.pwdVersion.Load()
 	hash, ok, err := getSetting(s.passwordHashKey())
 	if err != nil {
 		writeErr(w, 503, errDataSourceUnavailable)
@@ -571,14 +640,19 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, getSetting func(s
 		return
 	}
 	s.loginLimit.reset(ip)
-	if s.pwdState.Load() == pwdUnreadable {
+	if recovering && s.pwdState.Load() == pwdUnreadable {
 		s.loadPasswordVersion()
+		if s.pwdState.Load() == pwdUnreadable {
+			writeErr(w, 503, errDataSourceUnavailable)
+			return
+		}
+		version = s.pwdVersion.Load()
 	}
-	if s.pwdState.Load() == pwdUnreadable {
-		writeErr(w, 503, errDataSourceUnavailable)
+	if version != s.pwdVersion.Load() {
+		writeErr(w, 409, "Sessions changed during login, please try again")
 		return
 	}
-	tok, err := signJWTVersion(s.jwtKey, s.pwdVersion.Load())
+	tok, err := signJWTVersion(s.jwtKey, version)
 	if err != nil {
 		writeErr(w, 500, "token generation failed")
 		return

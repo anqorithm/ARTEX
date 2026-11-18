@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import { Check, KeyRound, LogOut } from "lucide-react";
+import { Check, KeyRound, LogOut, ShieldOff } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
@@ -16,6 +16,7 @@ import { auth } from "@/lib/auth";
 import { cn, getInitials } from "@/lib/utils";
 
 import { ChangePasswordDialog } from "./change-password-dialog";
+import { RevokeSessionsDialog } from "./revoke-sessions-dialog";
 
 export function AccountSwitcher({
   users,
@@ -30,6 +31,7 @@ export function AccountSwitcher({
 }) {
   const [activeUser, setActiveUser] = useState(users[0]);
   const [pwOpen, setPwOpen] = useState(false);
+  const [revokeOpen, setRevokeOpen] = useState(false);
 
   function handleLogout() {
     auth.clearToken();
@@ -86,9 +88,14 @@ export function AccountSwitcher({
             <LogOut />
             Sign out
           </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setRevokeOpen(true)} className="text-destructive focus:text-destructive">
+            <ShieldOff />
+            Sign out everywhere
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
       <ChangePasswordDialog open={pwOpen} onOpenChange={setPwOpen} />
+      {revokeOpen && <RevokeSessionsDialog onClose={() => setRevokeOpen(false)} onSuccess={handleLogout} />}
     </>
   );
 }

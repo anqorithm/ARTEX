@@ -1,9 +1,6 @@
 package db
 
-import (
-	"database/sql"
-	"strconv"
-)
+import "database/sql"
 
 // Settings is a tiny key-value store for global app config the UI toggles at
 // runtime (e.g. traffic_capture). Missing keys fall back to caller defaults.
@@ -87,15 +84,7 @@ INSERT INTO settings(key, value) VALUES ($1, $2)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, hashKey, sealed); err != nil {
 		return 0, err
 	}
-	var raw string
-	if err := tx.QueryRow(`
-INSERT INTO settings(key, value) VALUES ($1, '1')
-ON CONFLICT (key) DO UPDATE
-SET value = (settings.value::bigint + 1)::text, updated_at = now()
-RETURNING value`, versionKey).Scan(&raw); err != nil {
-		return 0, err
-	}
-	n, err := strconv.ParseInt(raw, 10, 64)
+	n, err := bumpPasswordVersion(tx.QueryRow, versionKey)
 	if err != nil {
 		return 0, err
 	}
@@ -103,6 +92,22 @@ RETURNING value`, versionKey).Scan(&raw); err != nil {
 		return 0, err
 	}
 	return n, nil
+}
+
+// BumpPasswordVersion revokes sessions without writing the password hash.
+func (d *DB) BumpPasswordVersion(versionKey string) (int64, error) {
+	return bumpPasswordVersion(d.QueryRow, versionKey)
+}
+
+func bumpPasswordVersion(queryRow func(string, ...any) *sql.Row, versionKey string) (int64, error) {
+	var version int64
+	err := queryRow(`
+INSERT INTO settings(key, value) VALUES ($1, '1')
+ON CONFLICT (key) DO UPDATE
+SET value = (COALESCE(NULLIF(settings.value, '')::bigint, 0) + 1)::text, updated_at = now()
+WHERE COALESCE(NULLIF(settings.value, '')::bigint, 0) >= 0
+RETURNING value`, versionKey).Scan(&version)
+	return version, err
 }
 
 // InsertPassword writes the hash only when that key is absent, and sets the
